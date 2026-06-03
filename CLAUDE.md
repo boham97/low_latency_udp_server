@@ -67,6 +67,15 @@
 - BIOS C-states 비활성화
 - NUMA 최적화
 
+## 프로젝트 구조
+
+```
+├── include/ll/      # 공개 헤더
+├── src/             # net, spsc, mempool, engine, oms 등 디렉토리별 구현
+├── bench/           # 벤치마크
+└── tools/           # perf 스크립트 등
+```
+
 ## 코딩 규칙
 
 - 표준: C11
