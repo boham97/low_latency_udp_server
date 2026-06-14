@@ -161,6 +161,7 @@ static void print_result(const char *label, uint64_t *latencies, uint64_t elapse
 
     printf("[%s]\n", label);
     printf("  p50  = %6lu ns\n", percentile(latencies, NUM_ITEMS, 0.50));
+    printf("  p90  = %6lu ns\n", percentile(latencies, NUM_ITEMS, 0.90));
     printf("  p99  = %6lu ns\n", percentile(latencies, NUM_ITEMS, 0.99));
     printf("  p99.9= %6lu ns\n", percentile(latencies, NUM_ITEMS, 0.999));
     printf("  avg  = %8.1f ns\n", avg);
