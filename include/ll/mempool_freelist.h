@@ -7,13 +7,13 @@
 #include <stdint.h>
 
 /*
- * Lock-free fixed-size block pool backed by an intrusive free list.
- * Free slots are linked via index (not pointer) so the free-list head
- * fits in a single atomic word, allowing alloc/free from multiple
- * threads via CAS. ABA is possible if a slot is freed, reallocated,
- * and freed again between one thread's load and CAS of free_head;
- * acceptable for produce-once/consume-once message buffers where a
- * slot is never double-freed in flight.
+ * intrusive free list 기반의 lock-free 고정 크기 블록 풀.
+ * 빈 슬롯을 포인터가 아닌 인덱스로 연결하므로 free-list head가
+ * 하나의 atomic 워드에 들어가며, 여러 스레드에서 CAS로 alloc/free
+ * 가능. 한 스레드가 free_head를 load하고 CAS하는 사이에 슬롯이
+ * free → 재할당 → 다시 free되면 ABA 문제가 발생할 수 있음. 슬롯이
+ * 진행 중에 이중 free되지 않는 produce-once/consume-once 메시지
+ * 버퍼에서는 허용 가능.
  */
 #define LL_MEMPOOL_FREELIST_DEFINE(NAME, TYPE, CAPACITY)                      \
     typedef struct {                                                         \
@@ -37,7 +37,7 @@
         atomic_store_explicit(&p->free_head, 0, memory_order_relaxed);       \
     }                                                                         \
                                                                                \
-    /* Returns NULL if the pool is exhausted. */                             \
+    /* 풀이 고갈되면 NULL 반환. */                                            \
     static inline TYPE *NAME##_alloc(NAME##_t *p) {                          \
         uint32_t head =                                                      \
             atomic_load_explicit(&p->free_head, memory_order_acquire);       \

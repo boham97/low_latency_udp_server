@@ -6,11 +6,10 @@
 #include <stdint.h>
 
 /*
- * Per-core fixed-size block pools: each core gets its own free-index
- * stack with no cross-core synchronization, so alloc/free never touch
- * an atomic. The tradeoff is that a block allocated from one core's
- * pool must be freed back to that same core's pool — no migration
- * support, caller's responsibility.
+ * 코어별 고정 크기 블록 풀: 각 코어가 자신만의 free-index 스택을
+ * 가지며 코어 간 동기화가 없으므로 alloc/free가 atomic을 전혀 건드리지
+ * 않음. 단, 한 코어의 풀에서 할당한 블록은 반드시 같은 코어의 풀로
+ * 반환해야 함 — 마이그레이션 미지원, 호출자 책임.
  */
 #define LL_MEMPOOL_PERCORE_DEFINE(NAME, TYPE, CAPACITY_PER_CORE, NCORES)      \
     typedef struct {                                                         \
@@ -33,7 +32,7 @@
         }                                                                     \
     }                                                                         \
                                                                                \
-    /* Returns NULL if core_id's pool is exhausted. */                       \
+    /* core_id의 풀이 고갈되면 NULL 반환. */                                  \
     static inline TYPE *NAME##_alloc(NAME##_t *p, uint32_t core_id) {        \
         NAME##_core_pool_t *cp = &p->core[core_id];                          \
         if (cp->top == 0) {                                                   \
@@ -42,7 +41,7 @@
         return &cp->slots[cp->free_idx[--cp->top]];                          \
     }                                                                         \
                                                                                \
-    /* item must have been allocated from this same core's pool. */         \
+    /* item은 반드시 같은 코어의 풀에서 할당된 것이어야 함. */              \
     static inline void NAME##_free(NAME##_t *p, uint32_t core_id,            \
                                     TYPE *item) {                             \
         NAME##_core_pool_t *cp = &p->core[core_id];                          \

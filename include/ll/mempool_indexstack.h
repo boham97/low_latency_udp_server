@@ -6,10 +6,9 @@
 #include <stdint.h>
 
 /*
- * Single-threaded fixed-size block pool. Free slot indices live in a
- * plain array-based LIFO stack (no pointer chasing, no atomics), so
- * alloc/free are pure array accesses — use when the pool is only
- * touched from one core's hot path.
+ * 단일 스레드용 고정 크기 블록 풀. 빈 슬롯 인덱스를 단순 배열 기반
+ * LIFO 스택에 보관(포인터 추적 없음, atomic 없음)하므로 alloc/free가
+ * 순수 배열 접근만으로 끝남 — 풀을 한 코어의 핫패스에서만 다룰 때 사용.
  */
 #define LL_MEMPOOL_INDEXSTACK_DEFINE(NAME, TYPE, CAPACITY)                    \
     typedef struct {                                                         \
@@ -25,7 +24,7 @@
         p->top = (CAPACITY);                                                  \
     }                                                                         \
                                                                                \
-    /* Returns NULL if the pool is exhausted. */                             \
+    /* 풀이 고갈되면 NULL 반환. */                                            \
     static inline TYPE *NAME##_alloc(NAME##_t *p) {                          \
         if (p->top == 0) {                                                    \
             return NULL;                                                      \
