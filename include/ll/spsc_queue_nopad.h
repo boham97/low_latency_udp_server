@@ -1,24 +1,24 @@
-#ifndef LL_SPSC_QUEUE_H
-#define LL_SPSC_QUEUE_H
+#ifndef LL_SPSC_QUEUE_NOPAD_H
+#define LL_SPSC_QUEUE_NOPAD_H
 
-#include <stdalign.h>
 #include <stdatomic.h>
 #include <stddef.h>
 
 /*
- * Lock-free SPSC 링버퍼. 단일 producer, 단일 consumer 전용.
- * head는 consumer만, tail은 producer만 갱신하므로 CAS 불필요 —
- * acquire/release 순서의 단순 atomic load/store만으로 안전하게 publish 가능.
+ * SPSC 링버퍼 변형 1/3: 캐시라인 정렬 없음 (베이스라인).
+ * head/tail/buf가 정렬 없이 인접 배치되어 같은 캐시라인을 공유한다.
+ * consumer가 head를, producer가 tail을 쓰면 서로의 라인을 invalidate 하는
+ * false sharing이 발생 — 이게 얼마나 손해인지 측정하기 위한 대조군.
  * CAPACITY는 2의 거듭제곱이어야 함 (modulo 대신 마스킹 사용).
  */
-#define LL_SPSC_QUEUE_DEFINE(NAME, TYPE, CAPACITY)                            \
+#define LL_SPSC_NOPAD_DEFINE(NAME, TYPE, CAPACITY)                            \
     _Static_assert(((CAPACITY) & ((CAPACITY) - 1)) == 0,                      \
                    #NAME " capacity must be a power of two");                \
                                                                                \
     typedef struct {                                                          \
-        alignas(64) _Atomic size_t head; /* consumer 소유 read index */      \
-        alignas(64) _Atomic size_t tail; /* producer 소유 write index */     \
-        alignas(64) TYPE buf[CAPACITY];                                       \
+        _Atomic size_t head; /* consumer 소유 read index */                  \
+        _Atomic size_t tail; /* producer 소유 write index */                 \
+        TYPE buf[CAPACITY];                                                   \
     } NAME##_t;                                                               \
                                                                                \
     static inline void NAME##_init(NAME##_t *q) {                            \
@@ -50,4 +50,4 @@
         return 1;                                                             \
     }
 
-#endif /* LL_SPSC_QUEUE_H */
+#endif /* LL_SPSC_QUEUE_NOPAD_H */
