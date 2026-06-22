@@ -1,5 +1,6 @@
 import asyncio
 import json
+import urllib.request
 import websockets
 from datetime import datetime
 
@@ -9,33 +10,51 @@ BINANCE_WS = "wss://stream.binance.com:9443/ws/btcusdt@bookTicker"
 # Upbit: KRW-BTC (원화 기준)
 UPBIT_WS   = "wss://api.upbit.com/websocket/v1"
 
+# 실제 USD/KRW 환율 (키 불필요, 일 1회 갱신)
+FX_API = "https://open.er-api.com/v6/latest/USD"
+
 # 공유 상태
 state = {
     "binance_mid": None,
     "upbit_mid":   None,
+    "fx_rate":     None,   # 실제 USD/KRW 환율
 }
 
+def fetch_fx():
+    with urllib.request.urlopen(FX_API, timeout=10) as resp:
+        return float(json.load(resp)["rates"]["KRW"])
+
 def print_diff():
-    b = state["binance_mid"]
-    u = state["upbit_mid"]
-    if b is None or u is None:
+    b  = state["binance_mid"]
+    u  = state["upbit_mid"]
+    fx = state["fx_rate"]
+    if b is None or u is None or fx is None:
         return
 
-    # 암묵적 환율 = Upbit KRW 가격 / Binance USD 가격
-    implied_rate   = u / b
+    # 시장 암묵 환율 = Upbit KRW 가격 / Binance USD 가격
+    implied_rate = u / b
 
-    # 환율차 = (Upbit - Binance*환율) / (Binance*환율) * 100
-    binance_in_krw = b * implied_rate
-    rate_diff_pct     = (u - binance_in_krw) / binance_in_krw * 100
+    # 가격 괴리율 = (Upbit - Binance를 실제환율로 환산) / 환산값 * 100
+    binance_in_krw = b * fx
+    premium_pct    = (u - binance_in_krw) / binance_in_krw * 100
 
     dt = datetime.now().strftime("%H:%M:%S.%f")[:-3]
     print(
         f"[{dt}] "
         f"Binance={b:>10.2f} USD  "
         f"Upbit={u:>14.0f} KRW  "
-        f"환율={implied_rate:>8.2f}  "
-        f"환율차={rate_diff_pct:>+6.3f}%"
+        f"실제환율={fx:>8.2f}  "
+        f"암묵환율={implied_rate:>8.2f}  "
+        f"괴리율={premium_pct:>+6.3f}%"
     )
+
+async def fx_updater():
+    while True:
+        try:
+            state["fx_rate"] = await asyncio.to_thread(fetch_fx)
+        except Exception as e:
+            print(f"[!] 환율 조회 실패: {e}")
+        await asyncio.sleep(3600)  # 환율 소스가 일 1회 갱신이라 1시간 주기로 충분
 
 async def binance_receiver():
     async with websockets.connect(BINANCE_WS) as ws:
@@ -60,7 +79,6 @@ async def upbit_receiver():
         await ws.send(payload)
 
         while True:
-            print('recv!')
             raw  = await ws.recv()
             data = json.loads(raw)
             if data.get("type") != "orderbook":
@@ -73,9 +91,10 @@ async def upbit_receiver():
 
 async def main():
     print("[*] Binance + Upbit 연결 중...\n")
-    print(f"{'시각':<15} {'Binance':>14} {'Upbit':>18} {'환율':>10} {'환율차':>10}")
-    print("-" * 80)
+    print(f"{'시각':<15} {'Binance':>14} {'Upbit':>18} {'실제환율':>10} {'암묵환율':>10} {'괴리율':>8}")
+    print("-" * 90)
     await asyncio.gather(
+        fx_updater(),
         binance_receiver(),
         upbit_receiver(),
     )
