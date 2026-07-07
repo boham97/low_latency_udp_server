@@ -3,3 +3,11 @@ compile_commands.json
 *.o
 *.out
 perf.data*
+
+# 컴파일된 파서 바이너리 (test/*.c 에서 빌드됨)
+test/iex_deep_parse
+test/iex_deep_parse_pcap
+
+# 스펙 PDF / pcap 캡처 (대용량 데이터, 리포에 안 넣음)
+*.pdf
+*.pcap
