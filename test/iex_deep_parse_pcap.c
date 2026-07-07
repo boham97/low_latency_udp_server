@@ -93,7 +93,7 @@ static void bump(uint8_t t) {
 }
 
 /* limit how many of each kind we print in detail */
-static int show_trade = 8, show_plu = 8, show_admin = 12, show_auction = 4;
+static int show_trade = 8, show_plu = 100, show_admin = 12, show_auction = 4;
 
 /* ---- decode one DEEP message (len bytes starting at m) ---- */
 static void decode_deep(const uint8_t *m, uint16_t len) {
