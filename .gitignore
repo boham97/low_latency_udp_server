@@ -7,6 +7,7 @@ perf.data*
 # 컴파일된 파서 바이너리 (test/*.c 에서 빌드됨)
 test/iex_deep_parse
 test/iex_deep_parse_pcap
+test/iex_deep_parse_mmap
 
 # 컴파일된 학습용 데모 바이너리 (test/*.c 에서 빌드됨)
 test/zerocopy_demo
