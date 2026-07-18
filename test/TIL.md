@@ -60,3 +60,51 @@ struct { uint16_t a; uint32_t b; uint16_t c; };  // 8바이트, b는 offset 2
 - 단, DEEP는 Timestamp가 offset 1 같은 **미정렬 위치**에 옴 → packed 구조체 오버레이 후
   값 읽기 or 필드 memcpy로 안전하게 접근(멤버 주소를 뽑아 넘기는 건 금지).
 - IEX는 **리틀엔디언** → x86에선 바이트 스왑 없이 그대로 읽힘.
+
+---
+
+# TIL — 파일 읽기: `malloc`+`fread` vs `mmap` (2026-07-19)
+
+## 뭘 바꿨나
+
+파서가 pcap 파일을 읽는 방식만 교체(파싱 로직은 한 줄도 안 건드림).
+
+```c
+// before: 빈 메모리 잡고 파일 전체를 복사
+uint8_t *buf = malloc(fsz);
+fread(buf, 1, fsz, fp);
+
+// after: 파일을 주소 공간에 직접 매핑, 복사 없음
+uint8_t *buf = mmap(NULL, fsz, PROT_READ, MAP_PRIVATE, fd, 0);
+```
+
+- `buf[i]`로 접근하는 결과는 동일 → 출력 완전 일치.
+- 차이는 "어떻게 메모리로 가져오나"에 있음.
+
+## 세 방식의 read 전략
+
+| 지표 | 손파싱(fread) | mmap | libpcap(read 4KB) |
+|------|---------------|------|-------------------|
+| read syscall | 1회(대신 큰 복사) | **0회** | 2,576회 |
+| 전체 복사 | 있음(10.5MB) | **없음** | 없음 |
+| page-fault | 2,634 | **223** | 179 |
+| IPC | 0.70 | **2.26** | 2.01 |
+| 실행 시간 | 10.5 ms | **2.3 ms** | 7.9 ms |
+
+## 왜 mmap이 빠른가
+
+1. **전체 복사가 사라짐** → 복사에 쓰던 명령 자체가 없어짐(instructions 30.5M→19.4M).
+2. **page-fault 12배 감소** — mmap은 파일 매핑이라 fault 시 커널이 여러 페이지를
+   미리 당겨옴(readahead/fault-around). 반면 `malloc`+`fread`는 익명 메모리라
+   4KB 페이지마다 minor fault → 10.5MB ÷ 4KB ≈ 2,570개(관측 2,634와 일치).
+3. **캐시 압박 절반** — fread는 "커널버퍼→내버퍼"로 메모리를 두 번 훑지만
+   mmap은 파싱하며 한 번만 훑음(cache-refs 2.06M→0.52M).
+
+## 메모
+
+- `open`→`fstat`(크기)→`mmap` 순서. 매핑 후엔 `close(fd)` 해도 매핑은 유효.
+- 정리는 `free`가 아니라 `munmap(buf, fsz)`.
+- `read` 4KB 반복(libpcap)은 syscall 폭탄, `fread` 전체 복사는 page-fault 폭탄
+  → 파일 기반 파싱에선 둘 다 피하는 mmap이 정답.
+- WSL2라 절대 수치는 노이즈지만, page-fault(2634 vs 223)·IPC(0.70 vs 2.26) 차이는
+  노이즈로 안 뒤집히는 크기 → 결론 유효.
