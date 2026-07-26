@@ -4,20 +4,24 @@ compile_commands.json
 *.out
 perf.data*
 
-# 컴파일된 파서 바이너리 (test/*.c 에서 빌드됨)
-test/iex_deep_parse
-test/iex_deep_parse_pcap
-test/iex_deep_parse_mmap
+# 컴파일된 파서 바이너리 (test/parse/*.c 에서 빌드됨)
+test/parse/iex_deep_parse
+test/parse/iex_deep_parse_pcap
+test/parse/iex_deep_parse_mmap
+test/parse/deep_dump
 
-# 컴파일된 학습용 데모 바이너리 (test/*.c 에서 빌드됨)
-test/zerocopy_demo
-test/copy_vs_zc
-test/pack_demo
-test/deep_dump
+# 컴파일된 UDP replay/서버 바이너리 (test/udp/*.c 에서 빌드됨)
+test/udp/udp_replay_send
+test/udp/udp_deep_server
 
-# DEEP 덤프 산출물 (deep_dump.c 로 재생성, 대용량)
-test/deep_dump.txt
-test/deep_dump.tsv
+# 컴파일된 학습용 데모 바이너리 (test/demo/*.c 에서 빌드됨)
+test/demo/zerocopy_demo
+test/demo/copy_vs_zc
+test/demo/pack_demo
+test/demo/buftest
+
+# 실행 산출물 (덤프 / strace 로그 — 재생성 가능, 대용량)
+test/out/
 
 # 에디터 swap
 *.swp

@@ -1,17 +1,13 @@
 /*
- * iex_deep_parse_mmap.c
- *
- * iex_deep_parse.c 와 파싱 로직은 동일. 파일 읽기만 malloc+fread 대신
- * mmap 으로 교체한 버전 — read syscall 0회, 전체 복사 0회, 페이지는
- * 실제 접근할 때만 lazy 로딩 (page-fault before/after 비교용).
+ * iex_deep_parse.c
  *
  * Self-contained parser for an IEX DEEP 1.0 capture in pcapng format.
  * No external libraries (no libpcap) — parses every layer by hand:
  *
  *   pcapng block  ->  Ethernet  ->  IPv4  ->  UDP  ->  IEX-TP segment  ->  DEEP messages
  *
- * Build:  gcc -O2 -Wall -o iex_deep_parse_mmap iex_deep_parse_mmap.c
- * Run:    ./iex_deep_parse_mmap 20180127_IEXTP1_DEEP1.0.pcap
+ * Build:  gcc -O2 -Wall -o iex_deep_parse iex_deep_parse.c
+ * Run:    ./iex_deep_parse ../data/20180127_IEXTP1_DEEP1.0.pcap
  *
  * The capture file and the wire format are little-endian; we read every
  * multi-byte field with explicit byte shifts so the code is independent of
@@ -24,10 +20,6 @@
 #include <string.h>
 #include <inttypes.h>
 #include <time.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
 
 /* ---- little-endian readers over a raw byte buffer ---- */
 static uint16_t rd16(const uint8_t *p) { return (uint16_t)(p[0] | (p[1] << 8)); }
@@ -279,16 +271,17 @@ static void parse_frame(const uint8_t *f, uint32_t caplen) {
 
 /* ---- pcapng walk ---- */
 int main(int argc, char **argv) {
-    const char *path = argc > 1 ? argv[1] : "20180127_IEXTP1_DEEP1.0.pcap";
-    int fd = open(path, O_RDONLY);
-    if (fd < 0) { perror("open"); return 1; }
-    struct stat st;
-    if (fstat(fd, &st) < 0) { perror("fstat"); return 1; }
-    long fsz = st.st_size;
-    /* 파일을 주소 공간에 직접 매핑 — read syscall/전체 복사 없이 buf[]로 접근 */
-    uint8_t *buf = mmap(NULL, fsz, PROT_READ, MAP_PRIVATE, fd, 0);
-    if (buf == MAP_FAILED) { perror("mmap"); return 1; }
-    close(fd);   /* 매핑 후엔 fd 닫아도 매핑은 유효 */
+    const char *path = argc > 1 ? argv[1] : "../data/20180127_IEXTP1_DEEP1.0.pcap";
+    FILE *fp = fopen(path, "rb");
+    if (!fp) { perror("open"); return 1; }
+    fseek(fp, 0, SEEK_END);
+    long fsz = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+    uint8_t *buf = malloc(fsz);
+    if (!buf || fread(buf, 1, fsz, fp) != (size_t)fsz) {
+        fprintf(stderr, "read failed\n"); return 1;
+    }
+    fclose(fp);
 
     if (fsz < 4 || rd32(buf) != 0x0A0D0D0A) {
         fprintf(stderr, "not a little-endian pcapng file\n");
@@ -342,6 +335,6 @@ int main(int argc, char **argv) {
     }
     printf("  %-29s %12" PRIu64 "\n", "TOTAL", tot);
 
-    munmap(buf, fsz);
+    free(buf);
     return 0;
 }

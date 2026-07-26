@@ -1,17 +1,21 @@
 /*
- * iex_deep_parse.c
+ * iex_deep_parse_pcap.c
  *
- * Self-contained parser for an IEX DEEP 1.0 capture in pcapng format.
- * No external libraries (no libpcap) — parses every layer by hand:
+ * libpcap version of iex_deep_parse.c — identical output, but the pcap/pcapng
+ * container walk is delegated to libpcap instead of hand-rolled block parsing.
  *
- *   pcapng block  ->  Ethernet  ->  IPv4  ->  UDP  ->  IEX-TP segment  ->  DEEP messages
+ *   pcap file  --libpcap-->  frame  ->  Ethernet -> IPv4 -> UDP
+ *                                          -> IEX-TP(0x8004) -> DEEP messages
  *
- * Build:  gcc -O2 -Wall -o iex_deep_parse iex_deep_parse.c
- * Run:    ./iex_deep_parse 20180127_IEXTP1_DEEP1.0.pcap
+ * libpcap (>= 1.1) reads both classic pcap and pcapng transparently, so the
+ * same 20180127_IEXTP1_DEEP1.0.pcap capture is handled without us touching
+ * Enhanced/Simple Packet Blocks by hand.
  *
- * The capture file and the wire format are little-endian; we read every
- * multi-byte field with explicit byte shifts so the code is independent of
- * the host's alignment/endianness.
+ * Build:  gcc -O2 -Wall -o iex_deep_parse_pcap iex_deep_parse_pcap.c -lpcap
+ * Run:    ./iex_deep_parse_pcap ../data/20180127_IEXTP1_DEEP1.0.pcap
+ *
+ * The DEEP wire format is little-endian; every multi-byte field is read with
+ * explicit byte shifts so decoding is independent of host alignment/endianness.
  */
 
 #include <stdio.h>
@@ -20,6 +24,7 @@
 #include <string.h>
 #include <inttypes.h>
 #include <time.h>
+#include <pcap.h>
 
 /* ---- little-endian readers over a raw byte buffer ---- */
 static uint16_t rd16(const uint8_t *p) { return (uint16_t)(p[0] | (p[1] << 8)); }
@@ -88,7 +93,7 @@ static void bump(uint8_t t) {
 }
 
 /* limit how many of each kind we print in detail */
-static int show_trade = 8, show_plu = 8, show_admin = 12, show_auction = 4;
+static int show_trade = 8, show_plu = 100, show_admin = 12, show_auction = 4;
 
 /* ---- decode one DEEP message (len bytes starting at m) ---- */
 static void decode_deep(const uint8_t *m, uint16_t len) {
@@ -269,57 +274,45 @@ static void parse_frame(const uint8_t *f, uint32_t caplen) {
     parse_iextp(f + pl_off, pl_len);
 }
 
-/* ---- pcapng walk ---- */
+/* ---- libpcap capture walk ---- */
 int main(int argc, char **argv) {
-    const char *path = argc > 1 ? argv[1] : "20180127_IEXTP1_DEEP1.0.pcap";
-    FILE *fp = fopen(path, "rb");
-    if (!fp) { perror("open"); return 1; }
-    fseek(fp, 0, SEEK_END);
-    long fsz = ftell(fp);
-    fseek(fp, 0, SEEK_SET);
-    uint8_t *buf = malloc(fsz);
-    if (!buf || fread(buf, 1, fsz, fp) != (size_t)fsz) {
-        fprintf(stderr, "read failed\n"); return 1;
-    }
-    fclose(fp);
+    const char *path = argc > 1 ? argv[1] : "../data/20180127_IEXTP1_DEEP1.0.pcap";
 
-    if (fsz < 4 || rd32(buf) != 0x0A0D0D0A) {
-        fprintf(stderr, "not a little-endian pcapng file\n");
+    char errbuf[PCAP_ERRBUF_SIZE];
+    pcap_t *pc = pcap_open_offline(path, errbuf);
+    if (!pc) { fprintf(stderr, "pcap_open_offline: %s\n", errbuf); return 1; }
+
+    /* We only handle Ethernet frames (DLT_EN10MB); IEX HIST captures are all
+     * Ethernet, but guard so a mismatched link type fails loudly rather than
+     * silently mis-parsing offsets. */
+    int dlt = pcap_datalink(pc);
+    if (dlt != DLT_EN10MB) {
+        fprintf(stderr, "unsupported link type: %s (%d), expected Ethernet\n",
+                pcap_datalink_val_to_name(dlt), dlt);
+        pcap_close(pc);
         return 1;
     }
 
-    printf("File: %s (%ld bytes)\n", path, fsz);
-    printf("Format: pcapng, parsing Ethernet -> IPv4 -> UDP -> IEX-TP(0x8004) -> DEEP\n\n");
+    printf("File: %s\n", path);
+    printf("Format: pcap/pcapng via libpcap %s, "
+           "parsing Ethernet -> IPv4 -> UDP -> IEX-TP(0x8004) -> DEEP\n\n",
+           pcap_lib_version());
     printf("== sample decoded messages ==\n");
 
     uint64_t packets = 0;
-    long off = 0;
-    while (off + 12 <= fsz) {
-        uint32_t btype = rd32(buf + off);
-        uint32_t blen  = rd32(buf + off + 4);
-        if (blen < 12 || off + (long)blen > fsz) break;   /* corrupt / EOF */
-
-        if (btype == 0x00000006) {            /* Enhanced Packet Block */
-            uint32_t caplen = rd32(buf + off + 20);
-            const uint8_t *frame = buf + off + 28;
-            if (off + 28 + (long)caplen <= fsz) {
-                parse_frame(frame, caplen);
-                packets++;
-            }
-        } else if (btype == 0x00000003) {     /* Simple Packet Block */
-            uint32_t orig = rd32(buf + off + 8);
-            const uint8_t *frame = buf + off + 12;
-            uint32_t caplen = blen - 16;
-            if (caplen > orig) caplen = orig;
-            parse_frame(frame, caplen);
-            packets++;
-        }
-        /* SHB(0x0A0D0D0A), IDB(1), and others: skip via block length */
-        off += blen;
+    struct pcap_pkthdr *hdr;
+    const u_char *data;
+    int rc;
+    while ((rc = pcap_next_ex(pc, &hdr, &data)) == 1) {
+        parse_frame((const uint8_t *)data, hdr->caplen);
+        packets++;
     }
+    if (rc == -1)
+        fprintf(stderr, "pcap read error: %s\n", pcap_geterr(pc));
+    pcap_close(pc);
 
     printf("\n== summary ==\n");
-    printf("packets (EPB)        : %" PRIu64 "\n", packets);
+    printf("packets              : %" PRIu64 "\n", packets);
     printf("IEX-TP DEEP segments : %" PRIu64 "\n", g_segments);
     printf("  of which heartbeats: %" PRIu64 "\n", g_heartbeats);
     printf("DEEP messages decoded: %" PRIu64 "\n\n", g_messages);
@@ -335,6 +328,5 @@ int main(int argc, char **argv) {
     }
     printf("  %-29s %12" PRIu64 "\n", "TOTAL", tot);
 
-    free(buf);
     return 0;
 }

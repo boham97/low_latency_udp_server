@@ -16,7 +16,7 @@
  *   extra      타입별 추가 필드
  *
  * Build: gcc -O2 -o deep_dump deep_dump.c -lpcap
- * Run:   ./deep_dump 20180127_IEXTP1_DEEP1.0.pcap > deep_dump.tsv
+ * Run:   ./deep_dump ../data/20180127_IEXTP1_DEEP1.0.pcap > ../out/deep_dump.tsv
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -140,7 +140,7 @@ static void frame(const uint8_t*f,uint32_t cl){
 }
 
 int main(int argc,char**argv){
-    const char*path=argc>1?argv[1]:"20180127_IEXTP1_DEEP1.0.pcap";
+    const char*path=argc>1?argv[1]:"../data/20180127_IEXTP1_DEEP1.0.pcap";
     char eb[PCAP_ERRBUF_SIZE]; pcap_t*pc=pcap_open_offline(path,eb);
     if(!pc){fprintf(stderr,"open: %s\n",eb);return 1;}
     printf("%8s %7s %4s %2s  %-14s %-4s %-19s %-29s %-8s %10s %12s  %s\n",

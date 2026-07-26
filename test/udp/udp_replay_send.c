@@ -47,7 +47,7 @@ static const uint8_t *udp_payload(const uint8_t *f, uint32_t caplen, uint32_t *o
 }
 
 int main(int argc, char **argv) {
-    const char *path  = argc > 1 ? argv[1] : "20180127_IEXTP1_DEEP1.0.pcap";
+    const char *path  = argc > 1 ? argv[1] : "../data/20180127_IEXTP1_DEEP1.0.pcap";
     const char *host  = argc > 2 ? argv[2] : "127.0.0.1";
     int         port  = argc > 3 ? atoi(argv[3]) : 9004;
     useconds_t  delay = argc > 4 ? (useconds_t)atoi(argv[4]) : 0;

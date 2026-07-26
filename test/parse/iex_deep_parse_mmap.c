@@ -1,21 +1,21 @@
 /*
- * iex_deep_parse_pcap.c
+ * iex_deep_parse_mmap.c
  *
- * libpcap version of iex_deep_parse.c — identical output, but the pcap/pcapng
- * container walk is delegated to libpcap instead of hand-rolled block parsing.
+ * iex_deep_parse.c 와 파싱 로직은 동일. 파일 읽기만 malloc+fread 대신
+ * mmap 으로 교체한 버전 — read syscall 0회, 전체 복사 0회, 페이지는
+ * 실제 접근할 때만 lazy 로딩 (page-fault before/after 비교용).
  *
- *   pcap file  --libpcap-->  frame  ->  Ethernet -> IPv4 -> UDP
- *                                          -> IEX-TP(0x8004) -> DEEP messages
+ * Self-contained parser for an IEX DEEP 1.0 capture in pcapng format.
+ * No external libraries (no libpcap) — parses every layer by hand:
  *
- * libpcap (>= 1.1) reads both classic pcap and pcapng transparently, so the
- * same 20180127_IEXTP1_DEEP1.0.pcap capture is handled without us touching
- * Enhanced/Simple Packet Blocks by hand.
+ *   pcapng block  ->  Ethernet  ->  IPv4  ->  UDP  ->  IEX-TP segment  ->  DEEP messages
  *
- * Build:  gcc -O2 -Wall -o iex_deep_parse_pcap iex_deep_parse_pcap.c -lpcap
- * Run:    ./iex_deep_parse_pcap 20180127_IEXTP1_DEEP1.0.pcap
+ * Build:  gcc -O2 -Wall -o iex_deep_parse_mmap iex_deep_parse_mmap.c
+ * Run:    ./iex_deep_parse_mmap ../data/20180127_IEXTP1_DEEP1.0.pcap
  *
- * The DEEP wire format is little-endian; every multi-byte field is read with
- * explicit byte shifts so decoding is independent of host alignment/endianness.
+ * The capture file and the wire format are little-endian; we read every
+ * multi-byte field with explicit byte shifts so the code is independent of
+ * the host's alignment/endianness.
  */
 
 #include <stdio.h>
@@ -24,7 +24,10 @@
 #include <string.h>
 #include <inttypes.h>
 #include <time.h>
-#include <pcap.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
 
 /* ---- little-endian readers over a raw byte buffer ---- */
 static uint16_t rd16(const uint8_t *p) { return (uint16_t)(p[0] | (p[1] << 8)); }
@@ -93,7 +96,7 @@ static void bump(uint8_t t) {
 }
 
 /* limit how many of each kind we print in detail */
-static int show_trade = 8, show_plu = 100, show_admin = 12, show_auction = 4;
+static int show_trade = 8, show_plu = 8, show_admin = 12, show_auction = 4;
 
 /* ---- decode one DEEP message (len bytes starting at m) ---- */
 static void decode_deep(const uint8_t *m, uint16_t len) {
@@ -274,45 +277,56 @@ static void parse_frame(const uint8_t *f, uint32_t caplen) {
     parse_iextp(f + pl_off, pl_len);
 }
 
-/* ---- libpcap capture walk ---- */
+/* ---- pcapng walk ---- */
 int main(int argc, char **argv) {
-    const char *path = argc > 1 ? argv[1] : "20180127_IEXTP1_DEEP1.0.pcap";
+    const char *path = argc > 1 ? argv[1] : "../data/20180127_IEXTP1_DEEP1.0.pcap";
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) { perror("open"); return 1; }
+    struct stat st;
+    if (fstat(fd, &st) < 0) { perror("fstat"); return 1; }
+    long fsz = st.st_size;
+    /* 파일을 주소 공간에 직접 매핑 — read syscall/전체 복사 없이 buf[]로 접근 */
+    uint8_t *buf = mmap(NULL, fsz, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (buf == MAP_FAILED) { perror("mmap"); return 1; }
+    close(fd);   /* 매핑 후엔 fd 닫아도 매핑은 유효 */
 
-    char errbuf[PCAP_ERRBUF_SIZE];
-    pcap_t *pc = pcap_open_offline(path, errbuf);
-    if (!pc) { fprintf(stderr, "pcap_open_offline: %s\n", errbuf); return 1; }
-
-    /* We only handle Ethernet frames (DLT_EN10MB); IEX HIST captures are all
-     * Ethernet, but guard so a mismatched link type fails loudly rather than
-     * silently mis-parsing offsets. */
-    int dlt = pcap_datalink(pc);
-    if (dlt != DLT_EN10MB) {
-        fprintf(stderr, "unsupported link type: %s (%d), expected Ethernet\n",
-                pcap_datalink_val_to_name(dlt), dlt);
-        pcap_close(pc);
+    if (fsz < 4 || rd32(buf) != 0x0A0D0D0A) {
+        fprintf(stderr, "not a little-endian pcapng file\n");
         return 1;
     }
 
-    printf("File: %s\n", path);
-    printf("Format: pcap/pcapng via libpcap %s, "
-           "parsing Ethernet -> IPv4 -> UDP -> IEX-TP(0x8004) -> DEEP\n\n",
-           pcap_lib_version());
+    printf("File: %s (%ld bytes)\n", path, fsz);
+    printf("Format: pcapng, parsing Ethernet -> IPv4 -> UDP -> IEX-TP(0x8004) -> DEEP\n\n");
     printf("== sample decoded messages ==\n");
 
     uint64_t packets = 0;
-    struct pcap_pkthdr *hdr;
-    const u_char *data;
-    int rc;
-    while ((rc = pcap_next_ex(pc, &hdr, &data)) == 1) {
-        parse_frame((const uint8_t *)data, hdr->caplen);
-        packets++;
+    long off = 0;
+    while (off + 12 <= fsz) {
+        uint32_t btype = rd32(buf + off);
+        uint32_t blen  = rd32(buf + off + 4);
+        if (blen < 12 || off + (long)blen > fsz) break;   /* corrupt / EOF */
+
+        if (btype == 0x00000006) {            /* Enhanced Packet Block */
+            uint32_t caplen = rd32(buf + off + 20);
+            const uint8_t *frame = buf + off + 28;
+            if (off + 28 + (long)caplen <= fsz) {
+                parse_frame(frame, caplen);
+                packets++;
+            }
+        } else if (btype == 0x00000003) {     /* Simple Packet Block */
+            uint32_t orig = rd32(buf + off + 8);
+            const uint8_t *frame = buf + off + 12;
+            uint32_t caplen = blen - 16;
+            if (caplen > orig) caplen = orig;
+            parse_frame(frame, caplen);
+            packets++;
+        }
+        /* SHB(0x0A0D0D0A), IDB(1), and others: skip via block length */
+        off += blen;
     }
-    if (rc == -1)
-        fprintf(stderr, "pcap read error: %s\n", pcap_geterr(pc));
-    pcap_close(pc);
 
     printf("\n== summary ==\n");
-    printf("packets              : %" PRIu64 "\n", packets);
+    printf("packets (EPB)        : %" PRIu64 "\n", packets);
     printf("IEX-TP DEEP segments : %" PRIu64 "\n", g_segments);
     printf("  of which heartbeats: %" PRIu64 "\n", g_heartbeats);
     printf("DEEP messages decoded: %" PRIu64 "\n\n", g_messages);
@@ -328,5 +342,6 @@ int main(int argc, char **argv) {
     }
     printf("  %-29s %12" PRIu64 "\n", "TOTAL", tot);
 
+    munmap(buf, fsz);
     return 0;
 }
