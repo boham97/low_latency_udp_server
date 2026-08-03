@@ -41,9 +41,46 @@ pcap → 이더넷/IP/UDP 제거 → **IEX-TP 헤더** → **DEEP 메시지**
 
 ```
 [pcap replay ──UDP──▶]  Rx (IEX-TP, seq갭) ─SPSC─▶ DEEP 디코드 ─SPSC─▶ 북 적용 + BBO 발행
-                          freelist 풀(msg)          freelist           고정 book 배열 (사전 할당)
+                       recvfrom → 링 슬롯 직접     슬롯 제자리 읽기    고정 book 배열 (사전 할당)
        각 스테이지 경계에 TSC 타임스탬프 → 구간별 p99 히스토그램
 ```
+
+### 스테이지 간 데이터 전달 (2026-08-04 확정)
+
+큐에 포인터나 인덱스를 싣지 않는다. 대신 **큐가 자기 슬롯 주소를 빌려주고,
+호출자가 거기에 직접 쓴다.**
+
+```c
+TYPE *push_begin(q);   /* 빈 슬롯 주소, 가득 차면 NULL — tail은 아직 안 올림 */
+void  push_commit(q);  /* tail release-store, 이 시점부터 소비자 소유 */
+TYPE *pop_begin(q);    /* 다음 슬롯 주소, 비면 NULL */
+void  pop_end(q);      /* head release-store */
+```
+
+- 기존 `push(q, const TYPE *item)`은 `buf[tail] = *item` 이라 호출자가 임시
+  객체를 만들어 복사할 수밖에 없다. 슬롯 주소를 먼저 받으면 그 복사가 사라진다.
+- Rx는 `recvfrom(fd, slot->data, ...)`로 **커널이 링 슬롯에 직접 쓰게** 한다.
+  커밋 전이면 롤백이 공짜 — 실패 시 그냥 커밋 안 하면 그 자리가 재사용된다.
+- 대가: 슬롯이 최대 데이터그램 크기 고정 (cap=1024 × 2KB → 링 하나 2MB).
+
+**mempool은 파이프라인에 쓰지 않는다.** 각 스테이지가 pop한 자리에서 처리를
+끝내는 한 링 슬롯이 곧 풀이고 수명 관리는 head/tail이 한다. 풀이 필요해지는 건
+소유권이 링의 FIFO 수명과 어긋날 때뿐 — (a) 슬롯 참조를 다음 스테이지로 넘겨
+`pop_end`를 미뤄야 할 때, (b) 반환이 FIFO 순서가 아닐 때, (c) 가변 길이라 슬롯
+크기를 못 고정할 때. `include/ll/mempool_*.h` 3종은 학습 산출물로 남기고 벤치
+대상으로만 쓴다.
+
+**이 API는 SPSC에서만 성립한다.** begin~commit 사이 슬롯은 "예약됐지만 미공개"
+상태인데, 생산자가 둘이면 tail이 안 올라간 사이 같은 슬롯을 둘 다 받는다.
+`fetch_add`로 자리를 예약해도 커밋 순서가 뒤집혀 아직 안 쓴 슬롯이 노출된다 —
+막으려면 슬롯별 시퀀스 번호가 필요하고(Vyukov bounded MPMC) 그건 다른 큐다.
+소비자 쪽도 대칭. 디코드를 2스레드로 늘리는 건 튜닝이 아니라 큐 교체다.
+
+호출 규칙 (SPSC 전제가 함수 안이 아니라 호출자 코드까지 늘어난 대가):
+
+1. `push_commit` 전에 `push_begin`을 다시 부르지 않는다 — 같은 슬롯이 두 번 나온다
+2. `push_commit` 이후 그 포인터를 만지지 않는다 — 그 순간부터 소비자 소유
+3. `pop_begin` 포인터는 `pop_end` 전까지만 유효 — 붙잡고 있으면 링이 막힌다
 
 ### 오더북 자료구조
 
@@ -57,6 +94,27 @@ pcap → 이더넷/IP/UDP 제거 → **IEX-TP 헤더** → **DEEP 메시지**
    (네트워크 없이 파싱/북 로직 정확성부터 확정).
 2. pcap → UDP **replay**로 전환, Rx 스테이지를 실제 수신 경로에 태움.
 3. SPSC 멀티스테이지 분리 + 레이턴시 하버스(구간별 TSC + 히스토그램) 탑재.
+
+### 현재 위치 (2026-08-04)
+
+| 영역 | 상태 |
+|------|------|
+| DEEP 파싱 (fread / libpcap / mmap) | 완료 — `test/parse/`, 전체 TSV 덤프까지 |
+| UDP replay + Rx seq 갭 | 완료 — `test/udp/` (독립 실행, 큐와 미연결) |
+| SPSC 큐 3종 + 벤치 | 완료 — `bench/results.md` (cached 우세) |
+| mempool 3종 | 헤더만, 벤치 없음 |
+| **오더북 / BBO** | **미착수** ← 진행순서 1단계의 남은 조각 |
+| `src/` | 비어 있음 (디렉토리 뼈대만) |
+
+다음 작업 순서:
+
+1. SPSC 헤더 3종에 슬롯 대여 API 추가 → 값 복사 버전과 벤치 비교
+   (payload 16B / 32B / 2KB로 "언제부터 복사가 아픈가" 측정)
+2. `src/deep/` — `test/parse/`의 디코드 로직 승격 (지금 파일 3개에 복붙 계보)
+3. `src/book/` — 사이드별 `{price,size}` 정렬배열, `size==0` 삭제,
+   심볼→인덱스 사전 할당
+4. Event Processing Complete 비트에서만 BBO 발행 →
+   `test/out/deep_dump.tsv`를 정답지로 특정 심볼 BBO 추이 대조
 
 ### 테스트 데이터
 
