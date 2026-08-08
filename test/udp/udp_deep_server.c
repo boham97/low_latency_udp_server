@@ -10,7 +10,7 @@
  * (소켓 버퍼 오버플로로 인한 드롭, 순서역전). 그래서 Rx 단계에서 seq 연속성을
  * 검사한다 — CLAUDE.md의 "시퀀스 갭 감지 → 드롭/백프레셔 정책"의 실제 근거.
  *
- * Build: gcc -O2 -Wall -I../common -o udp_deep_server udp_deep_server.c
+ * Build: gcc -O2 -Wall -I../../include -o udp_deep_server udp_deep_server.c
  * Run:   ./udp_deep_server [port]      (기본 9004)
  *        데이터가 2초간 안 오면 요약 출력 후 종료.
  */
@@ -26,7 +26,7 @@
 #include <sys/socket.h>
 #include <sys/time.h>
 
-#include "iex_deep_wire.h"
+#include <ll/iex_deep_wire.h>
 
 static void fmt_sym(const char *p, char *out) {
     int len = 8;
