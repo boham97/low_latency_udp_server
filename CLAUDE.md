@@ -40,15 +40,26 @@ pcap → 이더넷/IP/UDP 제거 → **IEX-TP 헤더** → **DEEP 메시지**
 ### 파이프라인
 
 ```
-[pcap replay ──UDP──▶]  Rx (IEX-TP, seq갭) ─SPSC─▶ DEEP 디코드 ─SPSC─▶ 북 적용 + BBO 발행
-                       recvfrom → 링 슬롯 직접     슬롯 제자리 읽기    고정 book 배열 (사전 할당)
+[pcap replay ──UDP──▶]  Rx (IEX-TP, seq갭, PLU 필터) ─SPSC─▶ DEEP 디코드 ─SPSC─▶ 북 적용 + BBO 발행
+                       recvfrom → 프레이밍 해체 →      슬롯 제자리 읽기    고정 book 배열 (사전 할당)
+                       PLU 30B만 슬롯에 복사
        각 스테이지 경계에 TSC 타임스탬프 → 구간별 p99 히스토그램
 ```
 
-### 스테이지 간 데이터 전달 (2026-08-04 확정)
+**Rx가 필터 지점이다.** 실측(2018-01-27 pcap): 전체 105,068 메시지 중 PLU는
+30,129개 — **71%는 큐를 안 건넌다.** 필터가 디코드 스테이지에 있으면 그 71%가
+링 슬롯을 먹고, 캐시라인을 먹고, 소비자가 타입 바이트를 보고 버리는 데까지
+코어를 쓴다. 프레이밍을 이미 벗겨 타입 바이트가 손에 있는 지점이 가장 싸다.
+
+**큐 가득 참 = drop-newest** (`push_begin`이 NULL). 생산자를 멈춰 기다리면 소켓
+버퍼가 넘쳐 어차피 커널이 버리는데, 그건 seq 갭으로만 보여 어디서 얼마나 잃었는지
+알 수 없다. Rx에서 버리면 최소한 개수를 정확히 센다 (`rx_stats_t.dropped_full`).
+갭 이후 첫 메시지에는 `RX_FLAG_AFTER_GAP`을 붙여 북 상태가 불완전함을 전달한다.
+
+### 스테이지 간 데이터 전달 (2026-08-04 확정 / 08-08 일부 번복)
 
 큐에 포인터나 인덱스를 싣지 않는다. 대신 **큐가 자기 슬롯 주소를 빌려주고,
-호출자가 거기에 직접 쓴다.**
+호출자가 거기에 직접 쓴다.** (실측 근거: `test/bench/results.md`)
 
 ```c
 TYPE *push_begin(q);   /* 빈 슬롯 주소, 가득 차면 NULL — tail은 아직 안 올림 */
@@ -59,9 +70,46 @@ void  pop_end(q);      /* head release-store */
 
 - 기존 `push(q, const TYPE *item)`은 `buf[tail] = *item` 이라 호출자가 임시
   객체를 만들어 복사할 수밖에 없다. 슬롯 주소를 먼저 받으면 그 복사가 사라진다.
-- Rx는 `recvfrom(fd, slot->data, ...)`로 **커널이 링 슬롯에 직접 쓰게** 한다.
-  커밋 전이면 롤백이 공짜 — 실패 시 그냥 커밋 안 하면 그 자리가 재사용된다.
-- 대가: 슬롯이 최대 데이터그램 크기 고정 (cap=1024 × 2KB → 링 하나 2MB).
+- 커밋 전이면 롤백이 공짜 — 실패 시 그냥 커밋 안 하면 그 자리가 재사용된다.
+
+실측 (`test/bench/slot_vs_index.c`, cap=1024, 9회 중앙값 M msg/s):
+
+| payload | copy | borrow | index | scatter |
+|---|---|---|---|---|
+| 16B | 48.5 | 49.5 | 36.7 | 43.0 |
+| 64B | 48.4 | 52.2 | 45.7 | 42.2 |
+| 2048B | 16.1 | **59.5** | 41.8 | 32.7 |
+
+- **인덱스 전달은 모든 크기에서 진다** (borrow 대비 -12~-30%, 9회 범위 비겹침). 코어 간에 오가는
+  캐시라인 스트림이 1개(링 슬롯)에서 2개(인덱스 큐 + 풀)로 늘고, 소비자는 인덱스를
+  읽어야 풀 주소를 알아 로드 의존성이 생긴다.
+- **복사는 2KB부터 아프다.** 16B/64B에선 copy와 borrow가 노이즈 안에서 동일 —
+  한 캐시라인 안에서 끝나는 복사는 공짜에 가깝다. 2KB에서 3.7배로 벌어진다
+  (값 복사 API는 스택→링, 링→스택으로 두 번 옮긴다).
+- **원소가 캐시라인보다 작으면 링 자체가 false sharing 면이 된다.** borrow가
+  페이로드가 커질수록 빨랐다 (49.5 → 52.2 → 59.5) — 16B면 라인 하나를 슬롯 4개가
+  공유해 producer/consumer가 같은 라인을 핑퐁한다. `rx_msg_t`를 64B에 맞춘 실질적 이유.
+
+#### recvfrom 제로카피는 채택하지 않았다 (2026-08-08 번복)
+
+당초 "Rx가 `recvfrom(fd, slot->data, ...)`로 커널이 링 슬롯에 직접 쓰게 한다"로
+확정했으나, 위 **PLU 필터와 동시에 성립하지 않는다.** 데이터그램 안에서 필요한
+조각만 골라내는 이상 커널은 최종 목적지를 알 수 없다. 둘 중 필터를 택했다:
+
+| | recvfrom 직접 | 필터 후 복사 (채택) |
+|---|---|---|
+| 슬롯 크기 | 2KB (최대 데이터그램) | **64B** (`rx_msg_t` = 캐시라인 1개) |
+| 링 크기 (cap=1024) | 2MB | **64KB** — L2에 들어간다 |
+| 복사 | 없음 | PLU당 30B 1회 |
+| 다음 스테이지 일감 | 전체 메시지 | **29%** (PLU만) |
+
+2KB 슬롯을 흘려보내며 71%를 뒤에서 버리는 것보다, 30B 복사를 내고 링을 L2에
+넣는 쪽이 낫다고 판단. 되돌릴 조건: 필터율이 낮아지거나(PLU 비중이 커지거나)
+가변 길이 메시지를 통째로 넘겨야 할 때.
+
+`rx_msg_t`는 정확히 64B다 (`_Static_assert`로 고정). 첫 멤버에 `alignas(64)`를
+걸어 구조체 정렬을 올렸다 — 매크로의 `alignas(64) TYPE buf[N]`은 배열 시작만
+맞추므로, 원소가 64B가 아니면 슬롯이 캐시라인을 걸친다.
 
 **mempool은 파이프라인에 쓰지 않는다.** 각 스테이지가 pop한 자리에서 처리를
 끝내는 한 링 슬롯이 곧 풀이고 수명 관리는 head/tail이 한다. 풀이 필요해지는 건
@@ -95,26 +143,41 @@ void  pop_end(q);      /* head release-store */
 2. pcap → UDP **replay**로 전환, Rx 스테이지를 실제 수신 경로에 태움.
 3. SPSC 멀티스테이지 분리 + 레이턴시 하버스(구간별 TSC + 히스토그램) 탑재.
 
-### 현재 위치 (2026-08-04)
+### 현재 위치 (2026-08-08)
 
 | 영역 | 상태 |
 |------|------|
 | DEEP 파싱 (fread / libpcap / mmap) | 완료 — `test/parse/`, 전체 TSV 덤프까지 |
-| UDP replay + Rx seq 갭 | 완료 — `test/udp/` (독립 실행, 큐와 미연결) |
+| UDP replay | 완료 — `test/udp/udp_replay_send.c` |
 | SPSC 큐 3종 + 벤치 | 완료 — `bench/results.md` (cached 우세) |
+| 슬롯 대여 API | `spsc_queue_cached.h`만 추가. 벤치 완료 — `test/bench/results.md` |
+| **Rx 스테이지 → SPSC** | **완료** — `src/net/`, PLU만 필터해 큐로 |
 | mempool 3종 | 헤더만, 벤치 없음 |
-| **오더북 / BBO** | **미착수** ← 진행순서 1단계의 남은 조각 |
-| `src/` | 비어 있음 (디렉토리 뼈대만) |
+| **디코드 / 오더북 / BBO** | **미착수** ← 진행순서 1단계의 남은 조각 |
+
+`src/net/` (실행 파일 `rx_stage`): `rx_stage_run()`이 recvfrom → IEX-TP 프레이밍 →
+seq 갭 검사 → PLU만 `rx_queue`로. `rx_main.c`는 개수만 세는 드레인 소비자
+(디코드 스테이지 자리채움). 검증: `test/out/deep_dump.tsv` 대조 —
+105,068 메시지 중 PLU 30,129개, push == pop == 30,129, 비-PLU 유입 0.
+와이어 구조체는 `include/ll/iex_deep_wire.h`로 승격 (`test/common/` 삭제).
 
 다음 작업 순서:
 
-1. SPSC 헤더 3종에 슬롯 대여 API 추가 → 값 복사 버전과 벤치 비교
-   (payload 16B / 32B / 2KB로 "언제부터 복사가 아픈가" 측정)
-2. `src/deep/` — `test/parse/`의 디코드 로직 승격 (지금 파일 3개에 복붙 계보)
-3. `src/book/` — 사이드별 `{price,size}` 정렬배열, `size==0` 삭제,
+1. `src/deep/` — 디코드 스테이지. `rx_msg_t`(와이어 packed)를 정렬 복원 +
+   심볼→인덱스 + 가격 스케일 해제해 두 번째 SPSC로. `test/parse/`의 로직 승격
+   (지금 파일 3개에 복붙 계보)
+2. `src/book/` — 사이드별 `{price,size}` 정렬배열, `size==0` 삭제,
    심볼→인덱스 사전 할당
-4. Event Processing Complete 비트에서만 BBO 발행 →
+3. Event Processing Complete 비트에서만 BBO 발행 →
    `test/out/deep_dump.tsv`를 정답지로 특정 심볼 BBO 추이 대조
+4. (보류) 얕은 큐(cap=8)에서 슬롯 대여 vs 인덱스 전달 재측정. `test/bench/`는
+   cap=1024만 재서 핸드오프 비용이 큐잉 대기시간에 묻혀 있다. nopad/padded에
+   슬롯 대여 API를 추가하는 것도 여기서 함께 (파이프라인은 cached로 굳어 급하지 않음).
+
+측정 메모: `rx_msg_t.rx_tsc`는 **데이터그램당 1회** 찍힌다. 그래서 push→pop
+구간에 같은 세그먼트 앞쪽 메시지의 파싱 시간이 섞인다 (첫 실측 p50 385 /
+p99 17.5k / p99.9 108k 사이클). 큐 핸드오프만 분리하려면 메시지별 타임스탬프가
+하나 더 필요 — 레이턴시 하버스 작업에서 정리.
 
 ### 테스트 데이터
 
@@ -187,11 +250,25 @@ void  pop_end(q);      /* head release-store */
 
 ```
 ├── include/ll/      # 공개 헤더
-├── src/             # net(수신/replay), spsc, mempool,
-│                    #   deep(IEX-TP/DEEP 디코드), book(오더북) 등
+│   ├── iex_deep_wire.h    # IEX-TP / DEEP 와이어 packed 구조체
+│   ├── spsc_queue_*.h     # SPSC 큐 3종 (nopad / padded / cached)
+│   ├── mempool_*.h        # 메모리 풀 3종 (학습 산출물, 벤치 대상)
+│   ├── rx_msg.h           # 큐 원소 rx_msg_t + rx_queue 인스턴스화
+│   ├── rx_stage.h         # Rx 스테이지 API + rx_stats_t
+│   └── tsc.h              # ll_rdtsc()
+├── src/
+│   ├── net/         # Rx 스테이지 (rx_stage.c) + 드레인 데모 (rx_main.c)
+│   ├── deep/        # (예정) IEX-TP/DEEP 디코드 스테이지
+│   ├── book/        # (예정) 오더북 적용 + BBO 발행
+│   ├── spsc/        # (비어 있음 — 큐는 헤더 온리)
+│   └── mempool/     # (비어 있음)
 ├── bench/           # 벤치마크 (디코드/북 적용/지연 히스토그램)
-└── tools/           # perf 스크립트, pcap replay 등
+├── test/            # 학습·실험 코드 (test/README.md 참고)
+└── tools/           # perf 스크립트 등
 ```
+
+빌드: `cmake -S . -B build && cmake --build build -j`
+실행: `./build/src/rx_stage 9004 &` → `test/udp/udp_replay_send`
 
 ## 코딩 규칙
 
