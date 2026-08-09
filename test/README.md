@@ -32,9 +32,13 @@ cd parse && ./deep_dump > ../out/deep_dump.tsv
 # UDP 경로: 서버 먼저 띄우고(2초 idle 시 자동 종료) 리플레이 송신
 cd udp && ./udp_deep_server 9004 & sleep 1; ./udp_replay_send
 
-# 슬롯 대여 vs 인덱스 전달 (조합당 별도 프로세스로 3회, 중앙값을 읽는다)
-cd bench && for v in copy borrow index scatter; do for b in 16 64 2048; do
-  for r in 1 2 3; do ./slot_vs_index $v $b; done; done; done
+# 슬롯 대여 vs 인덱스 전달 — 페이로드 크기마다 별도 바이너리를 빌드한다
+cd bench && for b in 16 64 2048; do
+  gcc -O2 -Wall -Wextra -I../../include -pthread -DPAYLOAD_BYTES=$b \
+      -o slot_vs_index_$b slot_vs_index.c; done
+# 조합당 별도 프로세스로 여러 번, 중앙값을 읽는다
+for b in 16 64 2048; do for v in copy borrow index scatter; do
+  ./slot_vs_index_$b $v; done; done
 
 # 서버 시스템콜 트레이스 (strace 오버헤드로 서버가 느려져 최대속도 리플레이는
 # 커널 큐에서 드롭된다 — 페이싱 150us를 줘야 전 구간이 잡힌다)

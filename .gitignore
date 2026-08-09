@@ -21,7 +21,7 @@ test/demo/pack_demo
 test/demo/buftest
 
 # 컴파일된 벤치 바이너리 (test/bench/*.c 에서 빌드됨)
-test/bench/slot_vs_index
+test/bench/slot_vs_index_*
 
 # 실행 산출물 (덤프 / strace 로그 — 재생성 가능, 대용량)
 test/out/
