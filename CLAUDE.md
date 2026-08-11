@@ -142,9 +142,33 @@ void  pop_end(q);      /* head release-store */
 
 ### 오더북 자료구조
 
-- 시작: 사이드별 `{price, size}` 정렬 배열(삽입정렬), best = 끝/앞.
+- 시작: 사이드별 `{price, size}` 정렬 배열(삽입정렬), **양쪽 다 `[0]`이 best**
+  (bid 내림차순 / ask 오름차순). BBO 발행이 첫 원소 두 개 읽기로 끝난다.
+  정렬 방향이 반대인 코드를 두 벌 두면 한쪽만 고치는 버그가 나므로,
+  bid에 부호를 뒤집어 두 사이드를 "키 오름차순" 한 벌로 처리한다.
 - 최적화(측정 후): price-tick 직접 인덱싱 배열(O(1) 갱신) + best 포인터 캐싱.
 - 심볼별 book은 사전 할당 배열(symbol → index), 동적 할당 금지.
+  `book_set_t`는 19MB라 **`book_set_init`이 레벨 배열을 memset하지 않는다** —
+  BSS/calloc으로 이미 0인 것을 전제하고 `n[]`만 신뢰한다. memset하면 실제로
+  쓰는 심볼이 39개일 때도 19MB 전부를 물리 페이지로 끌어온다.
+- 깊이: `BOOK_MAX_LEVELS=64`. 실측 최대 깊이는 사이드당 **14**라 여유가 크다.
+  초과분은 best에서 가장 먼 레벨을 떨어뜨리고 `overflow`로 센다 (BBO 영향 없음).
+
+**가격은 고정소수점 `x10000` 정수 그대로 둔다** (원래 "가격 스케일 해제"로
+적었던 것에서 번복). 북의 핫패스는 가격을 *비교*하고 *찾을* 뿐 산술을 안 한다.
+double로 바꾸면 정확한 정수 비교가 부동소수점 비교가 되고(틱 경계에서 `==`가
+어긋날 수 있다) 디코드마다 변환이 붙는다. 십진 변환은 출력 지점에서만.
+
+**심볼 → 인덱스**: 공백패딩 8바이트를 `uint64` 하나로 읽어 키로 쓴다 (strcmp도
+길이 계산도 없음). 오픈 어드레싱 + 선형 탐사, 슬롯 16K개 사전 할당.
+해시는 곱셈-시프트(Fibonacci) — ASCII 대문자라 하위 비트가 몰려 있어 마스킹만
+하면 군집이 슬롯 군집이 된다. 슬롯 배열이 256KB지만 **워킹셋은 테이블 크기가
+아니라 활성 심볼 수**다 (실측 39개). 인덱스는 등장 순서 발급 → 세션 밖으로
+들고 나가지 말 것.
+
+`delete_missing`(size==0인데 그 레벨이 없음)은 **갭 지표가 아니다.** 실측 pcap은
+seq 1부터 시작해 갭이 0인데도 16건 나오고, 파이썬 독립 재생도 같은 16건이다 —
+피드 자체가 없는 레벨에 삭제를 보낸다. 갭 판정은 `RX_FLAG_AFTER_GAP`이 한다.
 
 ### 진행 순서
 
@@ -153,7 +177,7 @@ void  pop_end(q);      /* head release-store */
 2. pcap → UDP **replay**로 전환, Rx 스테이지를 실제 수신 경로에 태움.
 3. SPSC 멀티스테이지 분리 + 레이턴시 하버스(구간별 TSC + 히스토그램) 탑재.
 
-### 현재 위치 (2026-08-08)
+### 현재 위치 (2026-08-11)
 
 | 영역 | 상태 |
 |------|------|
@@ -163,7 +187,32 @@ void  pop_end(q);      /* head release-store */
 | 슬롯 대여 API | `spsc_queue_cached.h`만 추가. 벤치 완료 — `test/bench/results.md` |
 | **Rx 스테이지 → SPSC** | **완료** — `src/net/`, PLU만 필터해 큐로 |
 | mempool 3종 | 헤더만, 벤치 없음 |
-| **디코드 / 오더북 / BBO** | **미착수** ← 진행순서 1단계의 남은 조각 |
+| **디코드 / 오더북 / BBO (오프라인)** | **완료 — 정답지 대조 일치** (아래) |
+| 라이브 경로 소비자 | `rx_main.c`는 아직 개수만 세는 자리채움 |
+| 디코드 스테이지 분리 (2번째 SPSC) | 미착수 — 나눌지 여부부터 측정 대상 |
+
+#### 진행순서 1단계 완료 (2026-08-11)
+
+`src/book/book_offline`: pcap → 프레이밍 → 디코드 → 북 → BBO, **단일 스레드**.
+
+스테이지를 안 나눈 게 의도다. 디코드 일감이 필드 재배치 몇 개라 큐 핸드오프
+비용보다 작을 수 있는데, 나눠놓고 시작하면 "나누는 게 이득인가"를 영영 못 잰다.
+정확성을 먼저 고정하고 분리는 before/after가 있는 변경으로 따로 한다.
+그래도 `rx_queue`는 통과시킨다 — 오프라인에서 확정한 것이 라이브와 같은
+코드여야 검증이 옮겨간다 (`rx_framer_segment` 한 벌을 공유, 큐는 세그먼트
+단위 배치 버퍼로 쓰임).
+
+검증: `test/book/verify_bbo.sh`. `test/book/bbo_reference.py`가 `deep_dump.tsv`를
+읽어 **공유 코드 없이**(파이썬, dict + max/min) BBO를 재생하고 diff한다.
+같은 버그를 양쪽이 동시에 낼 확률이 낮아야 대조가 의미를 갖는다.
+
+실측: 105,068 메시지 / PLU 30,129 / 심볼 39 / insert 3,157·update 23,954·delete
+3,002 / 최대 깊이 14 / **BBO 23,065줄 전부 일치**. 크로스 북 0건(락 20건은
+전부 테스트 심볼 ZWZZT의 bid==ask).
+
+`rx_stage.c`는 `rx_framer_segment()`로 프레이밍을 분리했다 (recvfrom 루프와
+pcap 리플레이가 같은 함수를 쓴다). 세그먼트를 넘는 상태는 `rx_framer_t`
+하나뿐 — `expected_seq`, `pending_flags`.
 
 `src/net/` (실행 파일 `rx_stage`): `rx_stage_run()`이 recvfrom → IEX-TP 프레이밍 →
 seq 갭 검사 → PLU만 `rx_queue`로. `rx_main.c`는 개수만 세는 드레인 소비자
@@ -173,14 +222,19 @@ seq 갭 검사 → PLU만 `rx_queue`로. `rx_main.c`는 개수만 세는 드레�
 
 다음 작업 순서:
 
-1. `src/deep/` — 디코드 스테이지. `rx_msg_t`(와이어 packed)를 정렬 복원 +
-   심볼→인덱스 + 가격 스케일 해제해 두 번째 SPSC로. `test/parse/`의 로직 승격
-   (지금 파일 3개에 복붙 계보)
-2. `src/book/` — 사이드별 `{price,size}` 정렬배열, `size==0` 삭제,
-   심볼→인덱스 사전 할당
-3. Event Processing Complete 비트에서만 BBO 발행 →
-   `test/out/deep_dump.tsv`를 정답지로 특정 심볼 BBO 추이 대조
-4. (보류) 얕은 큐(cap=8)에서 슬롯 대여 vs 인덱스 전달 재측정. `test/bench/`는
+1. **라이브 경로에 북 태우기** — `rx_main.c`의 개수 세는 드레인을
+   `deep_decode` + `book_apply` + BBO로 교체. UDP replay 결과가 오프라인
+   BBO와 일치하는지 확인 (drop-newest 때문에 완전 일치는 아닐 수 있음 —
+   `dropped_full`만큼 어긋나는지가 확인 대상). 진행순서 2단계.
+2. **디코드 스테이지를 뗄지 측정** — 지금 단일 스레드인 디코드+북을 두 번째
+   SPSC로 가르고 before/after. 디코드 일감이 작아 핸드오프 비용에 질 수
+   있다는 게 가설. 지는 쪽으로 나오면 안 나누는 것도 결론이다.
+3. 레이턴시 하버스 — 구간별 TSC + p50/p99/p99.9 히스토그램. 메시지별
+   타임스탬프가 없어 지금 push→pop에 같은 세그먼트 앞쪽 메시지의 파싱 시간이
+   섞이는 문제(아래 측정 메모)를 여기서 정리.
+4. 북 최적화 — price-tick 직접 인덱싱 + best 캐싱. 1~3에서 나온 기준선이
+   있어야 비교 대상이 생긴다.
+5. (보류) 얕은 큐(cap=8)에서 슬롯 대여 vs 인덱스 전달 재측정. `test/bench/`는
    cap=1024만 재서 핸드오프 비용이 큐잉 대기시간에 묻혀 있다. nopad/padded에
    슬롯 대여 API를 추가하는 것도 여기서 함께 (파이프라인은 cached로 굳어 급하지 않음).
 
@@ -264,12 +318,16 @@ p99 17.5k / p99.9 108k 사이클). 큐 핸드오프만 분리하려면 메시지
 │   ├── spsc_queue_*.h     # SPSC 큐 3종 (nopad / padded / cached)
 │   ├── mempool_*.h        # 메모리 풀 3종 (학습 산출물, 벤치 대상)
 │   ├── rx_msg.h           # 큐 원소 rx_msg_t + rx_queue 인스턴스화
-│   ├── rx_stage.h         # Rx 스테이지 API + rx_stats_t
+│   ├── rx_stage.h         # Rx 스테이지 API + rx_framer_t + rx_stats_t
+│   ├── deep_msg.h         # 디코드 출력 deep_update_t (정렬 완료, 64B)
+│   ├── deep_decode.h      # rx_msg_t → deep_update_t (인라인)
+│   ├── symtab.h           # 심볼 8B → 조밀 인덱스
+│   ├── book.h             # L2 오더북 + BBO
 │   └── tsc.h              # ll_rdtsc()
 ├── src/
 │   ├── net/         # Rx 스테이지 (rx_stage.c) + 드레인 데모 (rx_main.c)
-│   ├── deep/        # (예정) IEX-TP/DEEP 디코드 스테이지
-│   ├── book/        # (예정) 오더북 적용 + BBO 발행
+│   ├── deep/        # symtab.c (디코드 본체는 deep_decode.h 인라인)
+│   ├── book/        # book.c + book_offline.c (오프라인 파이프라인)
 │   ├── spsc/        # (비어 있음 — 큐는 헤더 온리)
 │   └── mempool/     # (비어 있음)
 ├── bench/           # 벤치마크 (디코드/북 적용/지연 히스토그램)
@@ -278,7 +336,10 @@ p99 17.5k / p99.9 108k 사이클). 큐 핸드오프만 분리하려면 메시지
 ```
 
 빌드: `cmake -S . -B build && cmake --build build -j`
-실행: `./build/src/rx_stage 9004 &` → `test/udp/udp_replay_send`
+
+- 오프라인 파이프라인: `./build/src/book_offline test/data/*.pcap --bbo`
+  (`--symbol AYI`로 한 심볼만). 검증: `./test/book/verify_bbo.sh`
+- 라이브: `./build/src/rx_stage 9004 &` → `test/udp/udp_replay_send`
 
 ## 코딩 규칙
 
