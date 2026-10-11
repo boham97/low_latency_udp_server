@@ -80,3 +80,52 @@ producer의 `tail` release-store와 consumer의 `head` 갱신이 같은 라인�
 `alignas(64)`로 head/tail/buf를 각각 다른 라인에 놓아 이 묶임을 끊는다.
 다만 padded는 여전히 매 push가 상대의 head를, 매 pop이 상대의 tail을 load
 하므로 그 라인의 코히런스 트래픽은 남고 — 그걸 마저 없앤 것이 cached다.
+
+## book_layout_bench — 오더북 레이아웃: [0]=best vs [n-1]=best
+
+`src/book/book.c`(정렬 배열, `[0]`=best)와 역순 변형 `bench/book_rev.c`(`[n-1]`=best)
+비교. 역순의 기대는 best 삽입/삭제에서 memmove가 0이 되는 것.
+
+### 먼저 본 분포 (`test/book/level_dist.py`, 실측 pcap PLU 30,129건)
+
+| 항목 | 결과 |
+|---|---|
+| 적용 시점 깊이 | 중앙값 4~5, 99.7%가 12 이하 (최대 14) |
+| update 위치 (best=0) | 0이 40%, ≤3이 83%, ≤5가 95% |
+| insert 위치 | 0(새 best)이 68% |
+| delete 위치 | 0(best 삭제)이 83% |
+| memmove 이동 레벨 수 | 중앙값 약 4 (64B), 최대 13 |
+| best와의 거리 | 같은 가격 41%, 50센트 이상 23% |
+
+→ 선형 탐색은 평균 1~2칸에서 끝난다 (이분탐색·SIMD 탐색의 이득 없음).
+갱신의 23%가 best에서 50틱 넘게 떨어져 있고 delete의 83%가 best라,
+price-tick 직접 인덱싱은 넓고 희소한 배열 + 잦은 best 재탐색이 되어 불리하다.
+
+### 측정
+
+`book_layout_bench <pcap> <check|fwd|rev> [reps]`. 입력을 미리 `deep_update_t`
+배열로 디코드해 두고 `book_apply`만 잰다. 두 구현 모두 별도 번역 단위(외부 호출).
+fwd/rev를 별도 프로세스로 번갈아 9회씩, `taskset -c 2`, 회당 200번 반복 후 중앙값.
+
+정확성(`check`): 실측 pcap에서 매 갱신 뒤 BBO + 최종 전 레벨 + 통계 일치.
+실측에는 overflow가 0건이라 가격 폭 200틱의 합성 랜덤 200만 건으로 초과 경로도
+대조 (overflow 86만 건 일치). 역순 첫 판의 overflow 버그를 이 합성 검증이 잡았다.
+
+| | 사이클/적용 (9회 중앙값) | 범위 |
+|---|---|---|
+| fwd (`[0]`=best) | **27.6** | 27.45–28.74 |
+| rev (`[n-1]`=best) | **27.1** | 27.08–27.68 |
+
+- 9쌍 중 8쌍에서 rev가 빠르지만 차이는 0.5사이클 (약 1.6%).
+- 호출별 rdtsc 히스토그램은 양쪽 모두 p50 35 / p99 105 / p99.9 140으로 동일.
+  값이 전부 35의 배수 — **이 VM의 TSC 해상도가 약 35사이클**이라 호출 단위
+  측정은 쓸 수 없다. 루프 전체 처리량으로만 판단한다.
+
+### 결론
+
+- **`book.c`는 바꾸지 않는다.** memmove는 적용의 20%(insert+delete)에서만 일어나고
+  평균 64B라 원래 몇 사이클이었다. 79%인 update는 처음부터 memmove가 없다.
+- 두 버전 모두 `memmove@plt`를 호출한다 (런타임 크기라 인라인 안 됨). rev는
+  크기 0이어도 호출하므로 호출 오버헤드는 남는다.
+- `book_apply` 전체가 약 27사이클 — 지금 파이프라인에서 북은 병목이 아니다.
+  push→pop 구간(p99 17.5k 사이클, CLAUDE.md 측정 메모)이 우선이다.

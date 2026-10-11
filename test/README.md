@@ -11,6 +11,8 @@ udp/      udp_replay_send.c, udp_deep_server.c
                                  pcap → UDP replay 송신기, UDP 수신 Rx 스테이지(seq 갭 검사)
 demo/     zerocopy_demo.c, copy_vs_zc.c, pack_demo.c, buftest.c
                                  개념 확인용 소품 (zero-copy, 구조체 패킹, stdio 버퍼링)
+book/     verify_bbo.sh, bbo_reference.py, level_dist.py
+                                 오프라인 BBO 독립 대조 + PLU의 레벨 위치/깊이 분포
 bench/    slot_vs_index.c        큐에 데이터 직접(복사/슬롯대여) vs 인덱스 전달 비교
                                  결과는 bench/results.md
 docs/     IEX_DEEP_프로토콜_정리.md, TIL*.md, spec/*.pdf
