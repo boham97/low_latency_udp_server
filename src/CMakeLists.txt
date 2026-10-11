@@ -7,10 +7,12 @@
 
 find_package(Threads REQUIRED)
 
-# Rx 스테이지 + 드레인 소비자 (스테이지 연결 확인용 실행 파일)
+# Rx 스테이지 + 디코드/북/BBO 소비자 (진행순서 2단계 — 라이브 경로)
 add_executable(rx_stage
     net/rx_stage.c
     net/rx_main.c
+    deep/symtab.c
+    book/book.c
 )
 target_link_libraries(rx_stage PRIVATE Threads::Threads)
 
