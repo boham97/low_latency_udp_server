@@ -215,8 +215,9 @@ pcap 리플레이가 같은 함수를 쓴다). 세그먼트를 넘는 상태는 
 하나뿐 — `expected_seq`, `pending_flags`.
 
 `src/net/` (실행 파일 `rx_stage`): `rx_stage_run()`이 recvfrom → IEX-TP 프레이밍 →
-seq 갭 검사 → PLU만 `rx_queue`로. `rx_main.c`는 개수만 세는 드레인 소비자
-(디코드 스테이지 자리채움). 검증: `test/out/deep_dump.tsv` 대조 —
+seq 갭 검사 → PLU만 `rx_queue`로. 이 시점의 `rx_main.c`는 개수만 세는 드레인
+소비자였다(디코드 스테이지 자리채움) — 2단계(아래)에서 `deep_decode` +
+`book_apply` + BBO로 교체됐다. 검증: `test/out/deep_dump.tsv` 대조 —
 105,068 메시지 중 PLU 30,129개, push == pop == 30,129, 비-PLU 유입 0.
 와이어 구조체는 `include/ll/iex_deep_wire.h`로 승격 (`test/common/` 삭제).
 
